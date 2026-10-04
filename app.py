@@ -12,7 +12,7 @@ import streamlit as st
 
 import deflated_stats as ds
 
-st.set_page_config(page_title="Best-of-N significance", layout="wide")
+st.set_page_config(page_title="Deflated Stats Dashboard", layout="wide")
 
 PRECISION = {"Fast (2e7 draws)": 2e7, "Standard (1e8 draws)": 1e8, "Precise (4e8 draws)": 4e8}
 DIST_KINDS = {
@@ -188,7 +188,7 @@ seed = int(sb.number_input("Random seed", value=42, step=1))
 # --------------------------------------------------------------------------- #
 # Main panel
 # --------------------------------------------------------------------------- #
-st.title("Is the improvement real, or just the best of N draws?")
+st.title("Deflated Stats Dashboard")
 st.caption(
     "Distribution of the best value of a statistic across N variants that all share the same true "
     "return distribution. A backtest improvement only counts if it beats this distribution, "
@@ -272,13 +272,39 @@ with right:
         st.warning("Few simulated samples sit beyond this level; raise precision for a stable estimate.")
 
 # ---- CDF plot ----
-lo = min(res.single_quantile(0.001), res.best_quantile(0.001))
-hi = max(res.single_quantile(0.999), res.best_quantile(0.999))
-if not (np.isfinite(lo) and np.isfinite(hi)) or lo == hi:
-    lo, hi = res.single_quantile(0.01), res.best_quantile(0.99)
-pad = 0.05 * (hi - lo)
-grid = np.linspace(lo - pad, hi + pad, 600)
+def _finite(vals):
+    return [v for v in vals if np.isfinite(v)]
+
+
+def _single_good(g):
+    """Single-trial value at goodness-quantile g (g = 0.95: better than 95% of trials)."""
+    return res.single_quantile(g if spec.higher_is_better else 1.0 - g)
+
+
+# Focused view: the body of the best-of-N curve (1%–99%), the single-trial curve from
+# its lower quartile up to its 95th percentile (measured in the "better" direction), and
+# the two marked values V and the critical value. The single trial's bad tail and the
+# far tails of fat-tailed ratios are left out so the region where decisions are made
+# fills the chart; zoom out or tick "Show full tails" to see them.
+focus_pts = _finite([res.best_quantile(0.01), res.best_quantile(0.99),
+                     _single_good(0.25), _single_good(0.95), V, crit])
+wide_pts = _finite([res.best_quantile(0.001), res.best_quantile(0.999),
+                    res.single_quantile(0.001), res.single_quantile(0.999)]) + focus_pts
+f_lo, f_hi = min(focus_pts), max(focus_pts)
+if f_hi <= f_lo:
+    f_lo, f_hi = f_lo - 1e-9 - abs(f_lo) * 0.1, f_hi + 1e-9 + abs(f_hi) * 0.1
+f_pad = 0.06 * (f_hi - f_lo)
+view = (f_lo - f_pad, f_hi + f_pad)
+w_lo, w_hi = min(wide_pts + [view[0]]), max(wide_pts + [view[1]])
+w_pad = 0.03 * (w_hi - w_lo)
+wide = (w_lo - w_pad, w_hi + w_pad)
+
+show_full = st.checkbox("Show full tails (0.1%–99.9%)", value=False)
+# Fine grid over the focused range plus a coarser one over the full range, so zooming
+# out (double-click the chart) still shows the tails.
+grid = np.unique(np.concatenate([np.linspace(*view, 800), np.linspace(*wide, 400)]))
 xs = grid * spec.display_scale
+x_range = [v * spec.display_scale for v in (wide if show_full else view)]
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=xs, y=res.single_cdf(grid), name="Single trial (N = 1)",
@@ -292,6 +318,7 @@ fig.add_vline(x=crit * spec.display_scale, line=dict(color="#2B8A3E", width=2, d
 fig.update_layout(
     height=480, margin=dict(l=10, r=10, t=30, b=10),
     xaxis_title=f"{spec.label}{f' ({spec.unit})' if spec.unit else ''}",
+    xaxis=dict(range=x_range),
     yaxis_title="Cumulative probability P(S ≤ x)", yaxis=dict(range=[0, 1.0]),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), hovermode="x unified",
 )
