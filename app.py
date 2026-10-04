@@ -64,7 +64,7 @@ block = 1
 if source == "Parametric":
     dist_label = sb.selectbox("Distribution", list(DIST_KINDS))
     kind = DIST_KINDS[dist_label]
-    ann_return = sb.number_input("Annualised log return (%)", value=10.0, step=1.0, format="%.2f") / 100
+    ann_return = sb.number_input("Annualised log return (%)", value=2.5, step=1.0, format="%.2f") / 100
     sharpe_in = sb.number_input("Sharpe ratio", value=1.0, step=0.1, format="%.2f")
     if sharpe_in == 0:
         ann_vol = sb.number_input("Annualised vol (%) — needed when Sharpe = 0", value=10.0, min_value=0.01) / 100
@@ -123,7 +123,7 @@ gmv = 1.0
 if stat == "pnl":
     gmv = sb.number_input("Constant GMV G", value=100_000_000.0, min_value=1.0, step=10_000_000.0, format="%.0f")
 sb.caption("Best = **lowest** value" if not spec.higher_is_better else "Best = **highest** value")
-N = int(sb.number_input("Number of trials N", value=20, min_value=1, step=1))
+N = int(sb.number_input("Number of trials N", value=1, min_value=1, step=1))
 sb.header("3 · Correlation between trials ρ")
 RHO_HELP = ("Pairwise correlation of daily returns between variants. Tweaks of the same strategy are "
             "often 0.5–0.9 correlated, which makes the best of N much less extreme than for "
@@ -276,28 +276,26 @@ def _finite(vals):
     return [v for v in vals if np.isfinite(v)]
 
 
-def _single_good(g):
-    """Single-trial value at goodness-quantile g (g = 0.95: better than 95% of trials)."""
-    return res.single_quantile(g if spec.higher_is_better else 1.0 - g)
+# The x-axis is centred on the best-of-N median (p = 0.5 sits in the middle of the
+# chart). The half-width is the furthest of: the best-of-N 1% and 99% quantiles, the
+# observed value V and the critical value, plus a small margin. The single-trial
+# curve is drawn as a reference wherever it falls. "Show full tails" widens the
+# symmetric window to the 0.1%–99.9% quantiles of both curves.
+centre = res.best_quantile(0.5)
 
 
-# Focused view: the body of the best-of-N curve (1%–99%), the single-trial curve from
-# its lower quartile up to its 95th percentile (measured in the "better" direction), and
-# the two marked values V and the critical value. The single trial's bad tail and the
-# far tails of fat-tailed ratios are left out so the region where decisions are made
-# fills the chart; zoom out or tick "Show full tails" to see them.
-focus_pts = _finite([res.best_quantile(0.01), res.best_quantile(0.99),
-                     _single_good(0.25), _single_good(0.95), V, crit])
-wide_pts = _finite([res.best_quantile(0.001), res.best_quantile(0.999),
-                    res.single_quantile(0.001), res.single_quantile(0.999)]) + focus_pts
-f_lo, f_hi = min(focus_pts), max(focus_pts)
-if f_hi <= f_lo:
-    f_lo, f_hi = f_lo - 1e-9 - abs(f_lo) * 0.1, f_hi + 1e-9 + abs(f_hi) * 0.1
-f_pad = 0.06 * (f_hi - f_lo)
-view = (f_lo - f_pad, f_hi + f_pad)
-w_lo, w_hi = min(wide_pts + [view[0]]), max(wide_pts + [view[1]])
-w_pad = 0.03 * (w_hi - w_lo)
-wide = (w_lo - w_pad, w_hi + w_pad)
+def _symmetric_window(points, margin):
+    half = max([abs(x - centre) for x in _finite(points)] + [0.0])
+    if half == 0.0:
+        half = 0.1 * abs(centre) + 1e-9
+    half *= 1.0 + margin
+    return centre - half, centre + half
+
+
+focus_pts = [res.best_quantile(0.01), res.best_quantile(0.99), V, crit]
+view = _symmetric_window(focus_pts, 0.06)
+wide = _symmetric_window(focus_pts + [res.best_quantile(0.001), res.best_quantile(0.999),
+                                      res.single_quantile(0.001), res.single_quantile(0.999)], 0.03)
 
 show_full = st.checkbox("Show full tails (0.1%–99.9%)", value=False)
 # Fine grid over the focused range plus a coarser one over the full range, so zooming
