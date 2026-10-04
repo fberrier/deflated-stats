@@ -264,7 +264,8 @@ with left:
     st.caption(f"P(best of {N} {cmp} V) under D: how often pure luck across {N} trials does at least this well.")
 with right:
     st.subheader("Value needed for a given p-value")
-    P = st.number_input("p-value P", value=0.05, min_value=1e-4, max_value=0.5, step=0.01, format="%.4f")
+    P = st.number_input("p-value P", value=0.25, min_value=1e-4, max_value=0.9999, step=0.05, format="%.4f",
+                        help="The chart is centred on the value needed for this p-value.")
     crit = res.critical_value(P)
     st.markdown(f"**{fmt(crit)}**")
     st.caption(f"Beat this to be {100*(1-P):.2f}% confident the result is better than the best of {N} lucky draws.")
@@ -276,12 +277,12 @@ def _finite(vals):
     return [v for v in vals if np.isfinite(v)]
 
 
-# The x-axis is centred on the best-of-N median (p = 0.5 sits in the middle of the
-# chart). The half-width is the furthest of: the best-of-N 1% and 99% quantiles, the
-# observed value V and the critical value, plus a small margin. The single-trial
-# curve is drawn as a reference wherever it falls. "Show full tails" widens the
-# symmetric window to the 0.1%–99.9% quantiles of both curves.
-centre = res.best_quantile(0.5)
+# The x-axis is centred on the value needed for the chosen p-value P (the critical
+# value). The half-width is the furthest of: the best-of-N 1% and 99% quantiles and
+# the observed value V, plus a small margin. The single-trial curve is drawn as a
+# reference wherever it falls. "Show full tails" widens the symmetric window to the
+# 0.1%–99.9% quantiles of both curves.
+centre = crit if np.isfinite(crit) else res.best_quantile(0.5)
 
 
 def _symmetric_window(points, margin):
