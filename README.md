@@ -31,6 +31,31 @@ Choose "Estimate from return series" and upload one or more files with the daily
 
 The correlation matrix appears in an expander under the chart.
 
+## Generating a sample series
+
+In parametric mode, open **Generate a sample series from D** in the sidebar. Choose the number of business days, whether to include dates (and the last date), the seed and the format, then click **Download sample**. The file saves to your browser's downloads folder.
+
+- **csv:** columns `date, log_return`, or just `log_return` without dates.
+- **pkl:** a pandas Series named `log_return`.
+
+Either file can be loaded straight back in upload mode.
+
+## Observed series panel (upload mode)
+
+When a returns file is loaded, the page shows:
+
+- **Chart:** cumulative P&L at a constant GMV, with the drawdown underneath.
+- **GMV box:** defaults to $10,000,000. It also sets the GMV for the PnL statistic.
+- **Stats table:**
+  - period
+  - annualised and cumulative return
+  - volatility and max drawdown
+  - Sharpe, Sortino and Calmar
+  - total, annualised and drawdown P&L in $, plus the best and worst day
+  - hit rate, skew and excess kurtosis
+
+P&L is not compounded, matching the PnL statistic. Drawdown % is measured on the compounded equity curve, matching the Max drawdown statistic.
+
 ## Outputs
 
 - CDF of the best of N, with the single-trial CDF for reference

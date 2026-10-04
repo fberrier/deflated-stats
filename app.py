@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 import deflated_stats as ds
 
@@ -45,6 +46,62 @@ def load_table(data: bytes, name: str) -> pd.DataFrame:
     import io
 
     return ds.load_returns_table(io.BytesIO(data), name)
+
+
+@st.cache_data(show_spinner=False)
+def make_sample_file(kind, ann_return, ann_vol, dof, skew, ekurt, n_days, seed, end, dated, file_format) -> bytes:
+    """Sample daily log returns from the chosen distribution and serialise them."""
+    import io
+
+    marginal = ds.make_parametric(kind, ann_return, ann_vol, dof=dof, skew=skew, excess_kurt=ekurt)
+    s = ds.generate_returns(marginal, n_days, seed=seed, end=end, dated=dated)
+    buf = io.BytesIO()
+    if file_format == "csv":
+        s.to_frame().to_csv(buf, index=dated, date_format="%Y-%m-%d", float_format="%.10g")
+    else:
+        s.to_pickle(buf)
+    return buf.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# Formatting (UK style: comma thousands separator, point decimal)
+# --------------------------------------------------------------------------- #
+MINUS = "−"
+
+
+def fmt_money(x: float) -> str:
+    if not np.isfinite(x):
+        return "n/a"
+    return f"{MINUS if x < 0 else ''}${abs(x):,.0f}"
+
+
+def fmt_pct(x: float, dp: int = 2) -> str:
+    if not np.isfinite(x):
+        return "n/a"
+    return f"{MINUS if x < 0 else ''}{abs(x) * 100:,.{dp}f}%"
+
+
+def fmt_num(x: float, dp: int = 2) -> str:
+    if not np.isfinite(x):
+        return "∞" if x > 0 else ("n/a" if np.isnan(x) else f"{MINUS}∞")
+    return f"{MINUS if x < 0 else ''}{abs(x):,.{dp}f}"
+
+
+def stats_table_html(sections: list[tuple[str, list[tuple[str, str]]]]) -> str:
+    """Compact two-column table with section headers; colours follow the Streamlit theme."""
+    rows = []
+    for title, items in sections:
+        rows.append(f'<tr class="sec"><td colspan="2">{title}</td></tr>')
+        rows += [f"<tr><td>{k}</td><td class='v'>{v}</td></tr>" for k, v in items]
+    css = """
+    <style>
+    table.dstats {width:100%; border-collapse:collapse; font-size:0.86rem;}
+    table.dstats td {padding:3px 6px; border-bottom:1px solid rgba(128,128,128,0.18);}
+    table.dstats td.v {text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap;}
+    table.dstats tr.sec td {font-weight:600; font-size:0.74rem; text-transform:uppercase;
+        letter-spacing:0.04em; opacity:0.65; padding-top:10px; border-bottom:none;}
+    </style>"""
+    return css + "<table class='dstats'>" + "".join(rows) + "</table>"
 
 
 # --------------------------------------------------------------------------- #
@@ -90,6 +147,28 @@ if source == "Parametric":
         ekurt = sb.number_input("Excess kurtosis", value=3.0, min_value=0.0, step=0.5, format="%.2f",
                                 help="Johnson SU needs more kurtosis than a lognormal with the same skew; "
                                      "if the target is infeasible the nearest feasible point is used.")
+
+    with sb.expander("Generate a sample series from D"):
+        st.caption("Draw daily log returns from this distribution and save them, e.g. to test the "
+                   "upload mode.")
+        gen_days = int(st.number_input("Number of business days", value=1260, min_value=20, step=252,
+                                       key="gen_days"))
+        gen_dated = st.checkbox("Include business-day dates", value=True, key="gen_dated")
+        gen_end = st.date_input("Last date", value=pd.Timestamp.today().date(), key="gen_end",
+                                format="DD/MM/YYYY", disabled=not gen_dated)
+        gen_seed = int(st.number_input("Seed", value=1, step=1, key="gen_seed"))
+        gen_fmt = st.radio("Format", ["csv", "pkl"], horizontal=True, key="gen_fmt",
+                           help="csv: columns date, log_return. pkl: a pandas Series named log_return.")
+        try:
+            gen_bytes = make_sample_file(kind, ann_return, ann_vol, dof, skew, ekurt, gen_days, gen_seed,
+                                         str(gen_end), gen_dated, gen_fmt)
+            st.download_button(
+                "Download sample", data=gen_bytes,
+                file_name=f"sample_{kind}_{gen_days}d_seed{gen_seed}.{gen_fmt}",
+                mime="text/csv" if gen_fmt == "csv" else "application/octet-stream",
+                width="stretch")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not generate: {exc}")
 else:
     up = sb.file_uploader("Daily log returns (.csv, .pkl, .parquet)", type=["csv", "pkl", "pickle", "parquet"],
                           help="One row per business day. Only upload pickles you trust.")
@@ -119,9 +198,15 @@ sb.caption(f"≈ {T / ds.TRADING_DAYS:.2f} years")
 stat_label = sb.selectbox("Statistic S", [s.label for s in ds.STATS.values()], index=2)
 stat = next(k for k, s in ds.STATS.items() if s.label == stat_label)
 spec = ds.STATS[stat]
-gmv = 1.0
+GMV_DEFAULT = 10_000_000.0
+gmv = GMV_DEFAULT
 if stat == "pnl":
-    gmv = sb.number_input("Constant GMV G", value=100_000_000.0, min_value=1.0, step=10_000_000.0, format="%.0f")
+    if source == "Parametric":
+        gmv = sb.number_input("Constant GMV G ($)", value=GMV_DEFAULT, min_value=1.0, step=1_000_000.0,
+                              format="%.0f", key="gmv_sidebar")
+        sb.caption(f"GMV: {fmt_money(gmv)}")
+    else:
+        sb.caption("GMV is set in the observed-series panel.")
 sb.caption("Best = **lowest** value" if not spec.higher_is_better else "Best = **highest** value")
 N = int(sb.number_input("Number of trials N", value=1, min_value=1, step=1))
 sb.header("3 · Correlation between trials ρ")
@@ -199,6 +284,70 @@ if source == "Upload returns file" and returns is None:
     st.info("Upload a file of daily returns in the sidebar to start.")
     st.stop()
 
+# ---- Observed series (upload mode) ----
+if source == "Upload returns file":
+    obs = next(iter(main_series.values()))
+    dated = isinstance(obs.index, pd.DatetimeIndex)
+    st.subheader("Observed series")
+    chart_col, table_col = st.columns([2.3, 1], gap="large")
+    with table_col:
+        gmv = st.number_input("GMV ($)", value=GMV_DEFAULT, min_value=1.0, step=1_000_000.0, format="%.0f",
+                              key="gmv_obs", help="Constant gross market value used for the $ P&L figures "
+                                                  "and for the PnL statistic.")
+        rep = ds.series_report(returns, gmv)
+        if dated:
+            period = [("Start", obs.index[0].strftime("%d %b %Y")), ("End", obs.index[-1].strftime("%d %b %Y"))]
+        else:
+            period = []
+        period += [("Business days", f"{rep['n_days']:,}"), ("Years", fmt_num(rep["years"], 2))]
+        st.markdown(stats_table_html([
+            ("Period", period),
+            ("Return & risk", [
+                ("Annualised return", fmt_pct(rep["ann_return"])),
+                ("Cumulative log return", fmt_pct(rep["total_log_return"])),
+                ("Annualised volatility", fmt_pct(rep["ann_vol"])),
+                ("Max drawdown", fmt_pct(-rep["max_dd"])),
+            ]),
+            ("Ratios", [
+                ("Sharpe", fmt_num(rep["sharpe"])),
+                ("Sortino", fmt_num(rep["sortino"])),
+                ("Calmar", fmt_num(rep["calmar"])),
+            ]),
+            (f"P&L at {fmt_money(gmv)} GMV", [
+                ("Total P&L", fmt_money(rep["total_pnl"])),
+                ("Annualised P&L", fmt_money(rep["ann_pnl"])),
+                ("Max drawdown ($)", fmt_money(rep["max_dd_usd"])),
+                ("Best day", fmt_money(rep["best_day_usd"])),
+                ("Worst day", fmt_money(rep["worst_day_usd"])),
+            ]),
+            ("Distribution", [
+                ("Hit rate", fmt_pct(rep["hit_rate"], 1)),
+                ("Skew", fmt_num(rep["skew"])),
+                ("Excess kurtosis", fmt_num(rep["excess_kurt"])),
+            ]),
+        ]), unsafe_allow_html=True)
+    with chart_col:
+        x = obs.index if dated else np.arange(1, len(obs) + 1)
+        pnl = ds.pnl_path(returns, gmv)
+        dd = ds.drawdown_path(returns)
+        sfig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.04)
+        sfig.add_trace(go.Scatter(x=x, y=pnl, name="Cumulative P&L", line=dict(color="#2F6FDE", width=2),
+                                  hovertemplate="%{y:$,.0f}<extra>Cumulative P&L</extra>"), row=1, col=1)
+        sfig.add_trace(go.Scatter(x=x, y=dd * 100, name="Drawdown", fill="tozeroy",
+                                  line=dict(color="#D9480F", width=1), fillcolor="rgba(217,72,15,0.25)",
+                                  hovertemplate="%{y:,.2f}%<extra>Drawdown</extra>"), row=2, col=1)
+        sfig.update_yaxes(title_text="Cumulative P&L ($)", tickprefix="$", tickformat=",.3s", row=1, col=1)
+        sfig.update_yaxes(title_text="Drawdown (%)", ticksuffix="%", row=2, col=1)
+        if not dated:
+            sfig.update_xaxes(title_text="Business day", row=2, col=1)
+        sfig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=10), showlegend=False,
+                           hovermode="x unified", separators=".,")
+        st.plotly_chart(sfig, width="stretch")
+        st.caption("P&L at constant GMV, not compounded (as in the PnL statistic). Drawdown is measured on "
+                   "the compounded equity curve (as in the Max drawdown statistic).")
+    st.divider()
+    st.subheader("Best-of-N distribution")
+
 with st.spinner("Simulating…"):
     try:
         if source == "Parametric":
@@ -215,8 +364,8 @@ def fmt(x: float) -> str:
         return "∞" if x > 0 else "−∞"
     v = x * spec.display_scale
     if stat == "pnl":
-        return f"{v:,.0f}"
-    return f"{v:.2f}{spec.unit}" if spec.unit else f"{v:.3f}"
+        return fmt_money(v)
+    return f"{fmt_num(v, 2)}{spec.unit}" if spec.unit else fmt_num(v, 3)
 
 
 # Distribution facts
@@ -321,7 +470,7 @@ fig.update_layout(
     yaxis_title="Cumulative probability P(S ≤ x)", yaxis=dict(range=[0, 1.0]),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), hovermode="x unified",
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # ---- Quantile table ----
 qs = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
@@ -331,11 +480,11 @@ table = pd.DataFrame({
     f"Best of {N}": [fmt(res.best_quantile(q)) for q in qs],
 })
 with st.expander("Quantiles"):
-    st.dataframe(table, hide_index=True, use_container_width=True)
+    st.dataframe(table, hide_index=True, width="stretch")
 
 if rho_est is not None:
     with st.expander(f"Correlation matrix ({rho_est.n_series} series, average {rho_est.rho:.3f})"):
-        st.dataframe(rho_est.matrix.round(3), use_container_width=True)
+        st.dataframe(rho_est.matrix.round(3), width="stretch")
         st.caption(f"Pairs aligned by {rho_est.aligned_by}; pairs with fewer than 20 shared days are left out. "
                    f"ρ used in the simulation: {rho:.3f}.")
 

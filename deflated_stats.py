@@ -497,7 +497,64 @@ def load_returns_table(file_obj, filename: str):
     return obj
 
 
+def generate_returns(marginal: ParametricMarginal, n_days: int, seed: int = 0, end=None, dated: bool = True):
+    """Sample a series of daily log returns from a parametric marginal.
+
+    Returns a pandas Series named "log_return", indexed by business days ending on
+    ``end`` (default: today) when ``dated``, else by day number.
+    """
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    r = marginal.from_normal_scores(rng.standard_normal(int(n_days)))
+    if dated:
+        idx = pd.bdate_range(end=pd.Timestamp(end or pd.Timestamp.today()).normalize(), periods=int(n_days), name="date")
+    else:
+        idx = pd.RangeIndex(int(n_days), name="day")
+    return pd.Series(r, index=idx, name="log_return")
+
+
+def pnl_path(r: np.ndarray, gmv: float) -> np.ndarray:
+    """Cumulative P&L at constant GMV (not compounded), consistent with the PnL statistic."""
+    return gmv * np.cumsum(np.expm1(r))
+
+
+def drawdown_path(r: np.ndarray) -> np.ndarray:
+    """Drawdown of the compounded equity curve exp(cumsum r), as a negative fraction."""
+    log_eq = np.cumsum(r)
+    peak = np.maximum(np.maximum.accumulate(log_eq), 0.0)
+    return np.exp(log_eq - peak) - 1.0
+
+
+def series_report(r: np.ndarray, gmv: float) -> dict:
+    """All dashboard statistics for one observed series of daily log returns."""
+    r = np.asarray(r, dtype=float)
+    pnl = pnl_path(r, gmv)
+    pnl_dd = pnl - np.maximum(np.maximum.accumulate(pnl), 0.0)
+    years = r.size / TRADING_DAYS
+    return {
+        "n_days": int(r.size),
+        "years": years,
+        "ann_return": float(compute_stat(r, "return")),
+        "total_log_return": float(r.sum()),
+        "ann_vol": float(compute_stat(r, "vol")),
+        "max_dd": float(compute_stat(r, "maxdd")),
+        "sharpe": float(compute_stat(r, "sharpe")),
+        "sortino": float(compute_stat(r, "sortino")),
+        "calmar": float(compute_stat(r, "calmar")),
+        "total_pnl": float(pnl[-1]),
+        "ann_pnl": float(pnl[-1] / years) if years > 0 else float("nan"),
+        "max_dd_usd": float(pnl_dd.min()),
+        "best_day_usd": float(gmv * np.expm1(r.max())),
+        "worst_day_usd": float(gmv * np.expm1(r.min())),
+        "hit_rate": float((r > 0).mean()),
+        "skew": float(sps.skew(r)),
+        "excess_kurt": float(sps.kurtosis(r)),
+    }
+
+
 _DATE_NAMES = {"date", "dates", "datetime", "time", "timestamp", "day", "asof", "as_of", "trade_date"}
+_INDEX_NAMES = {"day", "index", "idx", "row", "t"}
 
 
 def date_index_of(df):
@@ -510,7 +567,9 @@ def date_index_of(df):
 
     if isinstance(df.index, pd.DatetimeIndex):
         return df.index, None
-    candidates = [c for c in df.columns if str(c).strip().lower() in _DATE_NAMES]
+    # Numeric columns are never treated as dates (a day counter would parse as epoch times).
+    candidates = [c for c in df.columns
+                  if str(c).strip().lower() in _DATE_NAMES and not pd.api.types.is_numeric_dtype(df[c])]
     candidates += [c for c in df.columns if c not in candidates and not pd.api.types.is_numeric_dtype(df[c])]
     for c in candidates:
         if pd.api.types.is_datetime64_any_dtype(df[c]):
@@ -528,7 +587,10 @@ def numeric_columns(df) -> list:
     import pandas as pd
 
     _, date_col = date_index_of(df)
-    return [c for c in df.columns if c != date_col and pd.api.types.is_numeric_dtype(df[c])]
+    cols = [c for c in df.columns if c != date_col and pd.api.types.is_numeric_dtype(df[c])
+            and str(c).strip().lower() not in _INDEX_NAMES and not str(c).startswith("Unnamed:")]
+    # Put return-like column names first so they are the default choice.
+    return sorted(cols, key=lambda c: 0 if "ret" in str(c).lower() else 1)
 
 
 def extract_series(df, columns, simple_returns: bool = False, label_prefix: str = "") -> dict:
