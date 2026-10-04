@@ -69,6 +69,7 @@ P&L is not compounded, matching the PnL statistic. Drawdown % is measured on the
 - p-value of an observed value V: P(best of N is at least as good as V)
 - Value needed to reach a chosen p-value P: the (1 − P) quantile of the best of N
 - Quantile table, plus a Bailey & López de Prado check for the Gaussian Sharpe case
+- Optional two-sided confidence interval (default 95%) for the best-of-N value, drawn as two bars on the chart
 
 For vol and max drawdown, lower is better, so "best" means the minimum.
 

@@ -470,12 +470,23 @@ def _symmetric_window(points, margin):
     return centre - half, centre + half
 
 
-focus_pts = [res.best_quantile(0.01), res.best_quantile(0.99), V, crit]
+cc1, cc2, cc3 = st.columns([1.3, 1.3, 1.4])
+show_full = cc1.checkbox("Show full tails (0.1%–99.9%)", value=False)
+show_ci = cc2.checkbox("Show confidence interval", value=False,
+                       help=f"Two-sided interval that contains the best of {N} value of the statistic "
+                            "with the chosen probability under D (with N = 1, the single-trial interval).")
+ci_level = cc3.number_input("Confidence level (%)", value=95.0, min_value=50.0, max_value=99.9, step=1.0,
+                            format="%.1f", disabled=not show_ci, key="ci_level")
+ci = None
+if show_ci:
+    a = (1.0 - ci_level / 100.0) / 2.0
+    ci = (res.best_quantile(a), res.best_quantile(1.0 - a))
+
+focus_pts = [res.best_quantile(0.01), res.best_quantile(0.99), V, crit] + (list(ci) if ci else [])
 view = _symmetric_window(focus_pts, 0.06)
 wide = _symmetric_window(focus_pts + [res.best_quantile(0.001), res.best_quantile(0.999),
                                       res.single_quantile(0.001), res.single_quantile(0.999)], 0.03)
 
-show_full = st.checkbox("Show full tails (0.1%–99.9%)", value=False)
 # Fine grid over the focused range plus a coarser one over the full range, so zooming
 # out (double-click the chart) still shows the tails.
 grid = np.unique(np.concatenate([np.linspace(*view, 800), np.linspace(*wide, 400)]))
@@ -487,6 +498,13 @@ fig.add_trace(go.Scatter(x=xs, y=res.single_cdf(grid), name="Single trial (N = 1
                          line=dict(color="#9AA5B1", width=2, dash="dash")))
 fig.add_trace(go.Scatter(x=xs, y=res.cdf(grid), name=f"Best of {N}",
                          line=dict(color="#2F6FDE", width=3)))
+if ci:
+    ci_lo, ci_hi = (c * spec.display_scale for c in ci)
+    fig.add_vrect(x0=ci_lo, x1=ci_hi, fillcolor="rgba(124,58,237,0.08)", line_width=0, layer="below",
+                  annotation_text=f"{ci_level:g}% CI", annotation_position="top",
+                  annotation_font_color="#7C3AED")
+    for xv in (ci_lo, ci_hi):
+        fig.add_vline(x=xv, line=dict(color="#7C3AED", width=2, dash="dash"))
 fig.add_vline(x=V * spec.display_scale, line=dict(color="#D9480F", width=2),
               annotation_text=f"V · p={p:.3g}", annotation_position="top left")
 fig.add_vline(x=crit * spec.display_scale, line=dict(color="#2B8A3E", width=2, dash="dot"),
@@ -499,6 +517,10 @@ fig.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), hovermode="x unified",
 )
 st.plotly_chart(fig, width="stretch")
+if ci:
+    who = "single-trial" if N == 1 else f"best-of-{N}"
+    st.caption(f"{ci_level:g}% confidence interval for the {who} {spec.label} over {T:,} days: "
+               f"**{fmt(ci[0])}** to **{fmt(ci[1])}**.")
 
 # ---- Quantile table ----
 qs = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
