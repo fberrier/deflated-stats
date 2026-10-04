@@ -49,18 +49,26 @@ def load_table(data: bytes, name: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def make_sample_file(kind, ann_return, ann_vol, dof, skew, ekurt, n_days, seed, end, dated, file_format) -> bytes:
-    """Sample daily log returns from the chosen distribution and serialise them."""
+def make_sample_series(kind, ann_return, ann_vol, dof, skew, ekurt, n_days, seed, end, dated) -> pd.Series:
+    """Sample daily log returns from the chosen distribution."""
+    marginal = ds.make_parametric(kind, ann_return, ann_vol, dof=dof, skew=skew, excess_kurt=ekurt)
+    return ds.generate_returns(marginal, n_days, seed=seed, end=end, dated=dated)
+
+
+def series_to_bytes(s: pd.Series, file_format: str) -> bytes:
     import io
 
-    marginal = ds.make_parametric(kind, ann_return, ann_vol, dof=dof, skew=skew, excess_kurt=ekurt)
-    s = ds.generate_returns(marginal, n_days, seed=seed, end=end, dated=dated)
     buf = io.BytesIO()
     if file_format == "csv":
+        dated = isinstance(s.index, pd.DatetimeIndex)
         s.to_frame().to_csv(buf, index=dated, date_format="%Y-%m-%d", float_format="%.10g")
     else:
         s.to_pickle(buf)
     return buf.getvalue()
+
+
+def _new_draw():
+    st.session_state["gen_seed"] = int(st.session_state.get("gen_seed", 1)) + 1
 
 
 # --------------------------------------------------------------------------- #
@@ -113,6 +121,8 @@ source = sb.radio("Source", ["Parametric", "Upload returns file"], horizontal=Tr
 
 returns = None
 main_series: dict = {}
+gen_on = False
+gen_series = None
 ann_return = ann_vol = None
 dof, skew, ekurt = 5.0, 0.0, 3.0
 kind = "gaussian"
@@ -148,27 +158,28 @@ if source == "Parametric":
                                 help="Johnson SU needs more kurtosis than a lognormal with the same skew; "
                                      "if the target is infeasible the nearest feasible point is used.")
 
-    with sb.expander("Generate a sample series from D"):
-        st.caption("Draw daily log returns from this distribution and save them, e.g. to test the "
-                   "upload mode.")
-        gen_days = int(st.number_input("Number of business days", value=1260, min_value=20, step=252,
+    gen_on = sb.toggle("Generate a sample series from D", value=False, key="gen_on",
+                       help="Draw daily log returns from this distribution, inspect them in the main "
+                            "panel, redraw until you like one, then download it (e.g. to test the "
+                            "upload mode).")
+    if gen_on:
+        gen_days = int(sb.number_input("Number of business days", value=1260, min_value=20, step=252,
                                        key="gen_days"))
-        gen_dated = st.checkbox("Include business-day dates", value=True, key="gen_dated")
-        gen_end = st.date_input("Last date", value=pd.Timestamp.today().date(), key="gen_end",
+        gen_dated = sb.checkbox("Include business-day dates", value=True, key="gen_dated")
+        gen_end = sb.date_input("Last date", value=pd.Timestamp.today().date(), key="gen_end",
                                 format="DD/MM/YYYY", disabled=not gen_dated)
-        gen_seed = int(st.number_input("Seed", value=1, step=1, key="gen_seed"))
-        gen_fmt = st.radio("Format", ["csv", "pkl"], horizontal=True, key="gen_fmt",
+        if "gen_seed" not in st.session_state:
+            st.session_state["gen_seed"] = 1
+        gen_seed = int(sb.number_input("Seed", step=1, format="%d", key="gen_seed",
+                                       help="'New draw' in the main panel moves this on by one."))
+        gen_fmt = sb.radio("File format", ["csv", "pkl"], horizontal=True, key="gen_fmt",
                            help="csv: columns date, log_return. pkl: a pandas Series named log_return.")
         try:
-            gen_bytes = make_sample_file(kind, ann_return, ann_vol, dof, skew, ekurt, gen_days, gen_seed,
-                                         str(gen_end), gen_dated, gen_fmt)
-            st.download_button(
-                "Download sample", data=gen_bytes,
-                file_name=f"sample_{kind}_{gen_days}d_seed{gen_seed}.{gen_fmt}",
-                mime="text/csv" if gen_fmt == "csv" else "application/octet-stream",
-                width="stretch")
+            gen_series = make_sample_series(kind, ann_return, ann_vol, dof, skew, ekurt, gen_days, gen_seed,
+                                            str(gen_end), gen_dated)
         except Exception as exc:  # noqa: BLE001
-            st.error(f"Could not generate: {exc}")
+            sb.error(f"Could not generate: {exc}")
+            gen_series = None
 else:
     up = sb.file_uploader("Daily log returns (.csv, .pkl, .parquet)", type=["csv", "pkl", "pickle", "parquet"],
                           help="One row per business day. Only upload pickles you trust.")
@@ -200,13 +211,14 @@ stat = next(k for k, s in ds.STATS.items() if s.label == stat_label)
 spec = ds.STATS[stat]
 GMV_DEFAULT = 10_000_000.0
 gmv = GMV_DEFAULT
+series_panel_shown = source != "Parametric" or gen_series is not None
 if stat == "pnl":
-    if source == "Parametric":
+    if not series_panel_shown:
         gmv = sb.number_input("Constant GMV G ($)", value=GMV_DEFAULT, min_value=1.0, step=1_000_000.0,
                               format="%.0f", key="gmv_sidebar")
         sb.caption(f"GMV: {fmt_money(gmv)}")
     else:
-        sb.caption("GMV is set in the observed-series panel.")
+        sb.caption("GMV is set in the series panel.")
 sb.caption("Best = **lowest** value" if not spec.higher_is_better else "Best = **highest** value")
 N = int(sb.number_input("Number of trials N", value=1, min_value=1, step=1))
 sb.header("3 · Correlation between trials ρ")
@@ -284,68 +296,84 @@ if source == "Upload returns file" and returns is None:
     st.info("Upload a file of daily returns in the sidebar to start.")
     st.stop()
 
-# ---- Observed series (upload mode) ----
-if source == "Upload returns file":
-    obs = next(iter(main_series.values()))
+# ---- Series panel: observed (upload mode) or generated (parametric mode) ----
+def series_panel(title: str, obs: pd.Series, gmv_key: str, generated: bool = False) -> float:
+    """Chart + stats table for one return series, in a collapsible section. Returns the GMV."""
+    r = obs.to_numpy(dtype=float)
     dated = isinstance(obs.index, pd.DatetimeIndex)
-    st.subheader("Observed series")
-    chart_col, table_col = st.columns([2.3, 1], gap="large")
-    with table_col:
-        gmv = st.number_input("GMV ($)", value=GMV_DEFAULT, min_value=1.0, step=1_000_000.0, format="%.0f",
-                              key="gmv_obs", help="Constant gross market value used for the $ P&L figures "
+    with st.expander(title, expanded=True):
+        chart_col, table_col = st.columns([2.3, 1], gap="large")
+        with table_col:
+            if generated:
+                b1, b2 = st.columns(2)
+                b1.button("New draw", on_click=_new_draw, width="stretch",
+                          help="Redraw with the next seed.")
+                b2.download_button(
+                    "Download", data=series_to_bytes(obs, gen_fmt),
+                    file_name=f"sample_{kind}_{len(obs)}d_seed{gen_seed}.{gen_fmt}",
+                    mime="text/csv" if gen_fmt == "csv" else "application/octet-stream", width="stretch")
+                st.caption(f"Seed {gen_seed} · target: return {fmt_pct(ann_return)} · vol {fmt_pct(ann_vol)} · "
+                           f"Sharpe {fmt_num(ann_return / ann_vol)}")
+            g = st.number_input("GMV ($)", value=GMV_DEFAULT, min_value=1.0, step=1_000_000.0, format="%.0f",
+                                key=gmv_key, help="Constant gross market value used for the $ P&L figures "
                                                   "and for the PnL statistic.")
-        rep = ds.series_report(returns, gmv)
-        if dated:
-            period = [("Start", obs.index[0].strftime("%d %b %Y")), ("End", obs.index[-1].strftime("%d %b %Y"))]
-        else:
-            period = []
-        period += [("Business days", f"{rep['n_days']:,}"), ("Years", fmt_num(rep["years"], 2))]
-        st.markdown(stats_table_html([
-            ("Period", period),
-            ("Return & risk", [
-                ("Annualised return", fmt_pct(rep["ann_return"])),
-                ("Cumulative log return", fmt_pct(rep["total_log_return"])),
-                ("Annualised volatility", fmt_pct(rep["ann_vol"])),
-                ("Max drawdown", fmt_pct(-rep["max_dd"])),
-            ]),
-            ("Ratios", [
-                ("Sharpe", fmt_num(rep["sharpe"])),
-                ("Sortino", fmt_num(rep["sortino"])),
-                ("Calmar", fmt_num(rep["calmar"])),
-            ]),
-            (f"P&L at {fmt_money(gmv)} GMV", [
-                ("Total P&L", fmt_money(rep["total_pnl"])),
-                ("Annualised P&L", fmt_money(rep["ann_pnl"])),
-                ("Max drawdown ($)", fmt_money(rep["max_dd_usd"])),
-                ("Best day", fmt_money(rep["best_day_usd"])),
-                ("Worst day", fmt_money(rep["worst_day_usd"])),
-            ]),
-            ("Distribution", [
-                ("Hit rate", fmt_pct(rep["hit_rate"], 1)),
-                ("Skew", fmt_num(rep["skew"])),
-                ("Excess kurtosis", fmt_num(rep["excess_kurt"])),
-            ]),
-        ]), unsafe_allow_html=True)
-    with chart_col:
-        x = obs.index if dated else np.arange(1, len(obs) + 1)
-        pnl = ds.pnl_path(returns, gmv)
-        dd = ds.drawdown_path(returns)
-        sfig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.04)
-        sfig.add_trace(go.Scatter(x=x, y=pnl, name="Cumulative P&L", line=dict(color="#2F6FDE", width=2),
-                                  hovertemplate="%{y:$,.0f}<extra>Cumulative P&L</extra>"), row=1, col=1)
-        sfig.add_trace(go.Scatter(x=x, y=dd * 100, name="Drawdown", fill="tozeroy",
-                                  line=dict(color="#D9480F", width=1), fillcolor="rgba(217,72,15,0.25)",
-                                  hovertemplate="%{y:,.2f}%<extra>Drawdown</extra>"), row=2, col=1)
-        sfig.update_yaxes(title_text="Cumulative P&L ($)", tickprefix="$", tickformat=",.3s", row=1, col=1)
-        sfig.update_yaxes(title_text="Drawdown (%)", ticksuffix="%", row=2, col=1)
-        if not dated:
-            sfig.update_xaxes(title_text="Business day", row=2, col=1)
-        sfig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=10), showlegend=False,
-                           hovermode="x unified", separators=".,")
-        st.plotly_chart(sfig, width="stretch")
-        st.caption("P&L at constant GMV, not compounded (as in the PnL statistic). Drawdown is measured on "
-                   "the compounded equity curve (as in the Max drawdown statistic).")
-    st.divider()
+            rep = ds.series_report(r, g)
+            period = ([("Start", obs.index[0].strftime("%d %b %Y")), ("End", obs.index[-1].strftime("%d %b %Y"))]
+                      if dated else [])
+            period += [("Business days", f"{rep['n_days']:,}"), ("Years", fmt_num(rep["years"], 2))]
+            st.markdown(stats_table_html([
+                ("Period", period),
+                ("Return & risk", [
+                    ("Annualised return", fmt_pct(rep["ann_return"])),
+                    ("Cumulative log return", fmt_pct(rep["total_log_return"])),
+                    ("Annualised volatility", fmt_pct(rep["ann_vol"])),
+                    ("Max drawdown", fmt_pct(-rep["max_dd"])),
+                ]),
+                ("Ratios", [
+                    ("Sharpe", fmt_num(rep["sharpe"])),
+                    ("Sortino", fmt_num(rep["sortino"])),
+                    ("Calmar", fmt_num(rep["calmar"])),
+                ]),
+                (f"P&L at {fmt_money(g)} GMV", [
+                    ("Total P&L", fmt_money(rep["total_pnl"])),
+                    ("Annualised P&L", fmt_money(rep["ann_pnl"])),
+                    ("Max drawdown ($)", fmt_money(rep["max_dd_usd"])),
+                    ("Best day", fmt_money(rep["best_day_usd"])),
+                    ("Worst day", fmt_money(rep["worst_day_usd"])),
+                ]),
+                ("Distribution", [
+                    ("Hit rate", fmt_pct(rep["hit_rate"], 1)),
+                    ("Skew", fmt_num(rep["skew"])),
+                    ("Excess kurtosis", fmt_num(rep["excess_kurt"])),
+                ]),
+            ]), unsafe_allow_html=True)
+        with chart_col:
+            x = obs.index if dated else np.arange(1, len(obs) + 1)
+            pnl = ds.pnl_path(r, g)
+            dd = ds.drawdown_path(r)
+            sfig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.04)
+            sfig.add_trace(go.Scatter(x=x, y=pnl, name="Cumulative P&L", line=dict(color="#2F6FDE", width=2),
+                                      hovertemplate="%{y:$,.0f}<extra>Cumulative P&L</extra>"), row=1, col=1)
+            sfig.add_trace(go.Scatter(x=x, y=dd * 100, name="Drawdown", fill="tozeroy",
+                                      line=dict(color="#D9480F", width=1), fillcolor="rgba(217,72,15,0.25)",
+                                      hovertemplate="%{y:,.2f}%<extra>Drawdown</extra>"), row=2, col=1)
+            sfig.update_yaxes(title_text="Cumulative P&L ($)", tickprefix="$", tickformat=",.3s", row=1, col=1)
+            sfig.update_yaxes(title_text="Drawdown (%)", ticksuffix="%", row=2, col=1)
+            if not dated:
+                sfig.update_xaxes(title_text="Business day", row=2, col=1)
+            sfig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=10), showlegend=False,
+                               hovermode="x unified", separators=".,")
+            st.plotly_chart(sfig, width="stretch")
+            st.caption("P&L at constant GMV, not compounded (as in the PnL statistic). Drawdown is measured on "
+                       "the compounded equity curve (as in the Max drawdown statistic).")
+    return g
+
+
+if source == "Upload returns file":
+    gmv = series_panel("Observed series", next(iter(main_series.values())), "gmv_obs")
+elif gen_series is not None:
+    gmv = series_panel("Generated series", gen_series, "gmv_gen", generated=True)
+if series_panel_shown:
     st.subheader("Best-of-N distribution")
 
 with st.spinner("Simulating…"):

@@ -33,7 +33,14 @@ The correlation matrix appears in an expander under the chart.
 
 ## Generating a sample series
 
-In parametric mode, open **Generate a sample series from D** in the sidebar. Choose the number of business days, whether to include dates (and the last date), the seed and the format, then click **Download sample**. The file saves to your browser's downloads folder.
+In parametric mode, switch on **Generate a sample series from D** in the sidebar and set the number of business days, dates (and the last date), the seed and the file format.
+
+The draw appears in a collapsible **Generated series** panel with the same chart and stats table as an uploaded series, plus the target return, vol and Sharpe for comparison.
+
+- **New draw** moves on to the next seed. Keep redrawing until a realised path suits you.
+- **Download** saves the draw to your browser's downloads folder.
+
+File formats:
 
 - **csv:** columns `date, log_return`, or just `log_return` without dates.
 - **pkl:** a pandas Series named `log_return`.
@@ -42,10 +49,10 @@ Either file can be loaded straight back in upload mode.
 
 ## Observed series panel (upload mode)
 
-When a returns file is loaded, the page shows:
+When a returns file is loaded, a collapsible **Observed series** panel shows:
 
 - **Chart:** cumulative P&L at a constant GMV, with the drawdown underneath.
-- **GMV box:** defaults to $10,000,000. It also sets the GMV for the PnL statistic.
+- **GMV box:** defaults to $10,000,000. Whenever a series panel is shown, its GMV also sets the GMV for the PnL statistic.
 - **Stats table:**
   - period
   - annualised and cumulative return
